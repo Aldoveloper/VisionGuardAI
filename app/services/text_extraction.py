@@ -36,4 +36,4 @@ def detect_text_noise(detected_text: str) -> str:
                 return {"noMessage": True, "message": "Pero el texto no es completamente legible."}
 
 
-    return {"noMessage": False, "message": detected_text}
+    return detected_text

@@ -20,7 +20,8 @@ def format_objects(obj_list):
     return ", ".join(formatted_list[:-1]) + " y " + formatted_list[-1] if len(formatted_list) > 1 else formatted_list[0] if formatted_list else ""
 
 def describe_scene(detected_objects: list, detected_text: str = "") -> str:
-    if not detected_objects and not detected_text:
+    if not detected_objects :
+    # and not detected_text:
         return "No se detectaron objetos ni texto en la imagen."
 
     description = ""
@@ -40,12 +41,8 @@ def describe_scene(detected_objects: list, detected_text: str = "") -> str:
     if any(obj["label"] in {"car", "person", "bicycle", "motorcycle", "truck", "bus"} for obj in detected_objects):
         description += "Ten cuidado, hay obstáculos en tu camino. "
 
-    corrected_text = detect_text_noise(detected_text)
-    if corrected_text:
-        if corrected_text.get("noMessage"):
-            description += f"También veo un letrero o texto,'{corrected_text.get('message')}'. "
-        else:
-            description += f"También veo un letrero o texto que dice: '{corrected_text.get('message')}'. "
+    # corrected_text = detect_text_noise(detected_text)
+    # if corrected_text:
+    #     description += f"También veo un letrero o texto que dice: '{corrected_text}'. "
 
-   
     return description.strip()
