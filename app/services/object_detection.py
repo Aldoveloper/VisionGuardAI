@@ -2,21 +2,24 @@ import numpy as np
 import cv2
 from app.config import model, logger
 import time
+import os
 
 def detect_objects(image_bytes: bytes, conf_threshold: float = 0.2) -> dict:
     """
-    Detecta objetos en la imagen.
-    
-    Parámetros:
-      - image_bytes: Bytes de la imagen a procesar.
-      - conf_threshold: Umbral mínimo de confianza para aceptar una detección.
-    
-    Retorna:
-      Diccionario con las detecciones. Si ocurre algún error o no se detecta nada,
-      se retorna un objeto por defecto:
-      {"detected_objects": [{"label": "desconocido", "position": "desconocida", "confidence": 0}]}
+    Detecta objetos en la imagen y calcula el color promedio de cada objeto detectado.
     """
     try:
+        if not image_bytes:
+            logger.error("No se recibió ningún dato de imagen.")
+            return {"detected_objects": [{"label": "desconocido", "position": "desconocida", "confidence": 0}]}
+
+        # Log de verificación: longitud de los datos recibidos
+        
+        # Opcional: guardar la imagen a disco para depuración
+        temp_path = "temp_debug_image.jpg"
+        with open(temp_path, "wb") as f:
+            f.write(image_bytes)
+        
         # Convertir los bytes de la imagen a un array de Numpy y decodificarla
         np_arr = np.frombuffer(image_bytes, np.uint8)
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -24,22 +27,15 @@ def detect_objects(image_bytes: bytes, conf_threshold: float = 0.2) -> dict:
             logger.error("La imagen no se pudo decodificar.")
             return {"detected_objects": [{"label": "desconocido", "position": "desconocida", "confidence": 0}]}
         
-        logger.info("Imagen recibida y decodificada correctamente.")
-       
         height, width, _ = frame.shape
         # Enviar el frame al modelo para detección
-        medir_tiempo_proceso = time.perf_counter()
         results = model(frame)
-        final_time_process_image = time.perf_counter() - medir_tiempo_proceso
-        logger.info(f"Tiempo para procesar la imagen: {final_time_process_image:.2f} segundos.")
-
-        detected_objects = []
         
+        detected_objects = []
         for result in results:
             for box in result.boxes:
                 # Extraer la confianza de la detección
                 confidence = float(box.conf[0])
-                # Sólo se agrega el objeto si la confianza es mayor o igual que el umbral
                 if confidence < conf_threshold:
                     continue
                 
@@ -47,7 +43,7 @@ def detect_objects(image_bytes: bytes, conf_threshold: float = 0.2) -> dict:
                 cls = int(box.cls[0])
                 label = model.names.get(cls, "desconocido")
                 
-                # Calcular la posición del objeto según el centro de la caja (usando box.xywh)
+                # Calcular la posición del objeto según el centro de la caja (box.xywh)
                 x_center, y_center, w, h = box.xywh[0]
                 position = (
                     "izquierda" if x_center < width / 3
@@ -55,19 +51,41 @@ def detect_objects(image_bytes: bytes, conf_threshold: float = 0.2) -> dict:
                     else "centro"
                 )
                 
+                # Calcular coordenadas de la región de interés (ROI)
+                x1 = int(x_center - w / 2)
+                y1 = int(y_center - h / 2)
+                x2 = int(x_center + w / 2)
+                y2 = int(y_center + h / 2)
+                
+                # Asegurarse de que las coordenadas estén dentro de los límites
+                x1, y1 = max(x1, 0), max(y1, 0)
+                x2, y2 = min(x2, width), min(y2, height)
+                
+                roi = frame[y1:y2, x1:x2]
+                if roi.size == 0:
+                    color_str = "desconocido"
+                else:
+                    # Calcular el color promedio en formato BGR y convertir a RGB
+                    avg_color_bgr = cv2.mean(roi)[:3]
+                    avg_color_rgb = (int(avg_color_bgr[2]), int(avg_color_bgr[1]), int(avg_color_bgr[0]))
+                    color_str = f"{avg_color_rgb}"
+                
                 detected_objects.append({
                     "label": label,
                     "position": position,
-                    "confidence": confidence
+                    "confidence": confidence,
+                    "color": color_str
                 })
         
         if not detected_objects:
-            # Si no se detecta nada, retornar un objeto por defecto
-            detected_objects = [{"label": "desconocido", "position": "desconocida", "confidence": 0}]
+            return {"detected_objects": [{"label": "desconocido", "position": "desconocida", "confidence": 0}]}
         
+        logger.info(f"Objetos detectados: {detected_objects}")
         return {"detected_objects": detected_objects}
 
     except Exception as e:
         logger.error(f"Error en detect_objects: {e}")
-        # En caso de error, retorna el objeto por defecto indicando que no se obtuvo detección
-        return {"detected_objects": [{"label": "desconocido", "position": "desconocida", "confidence": 0}], "error": "Error en detección"}
+        return {
+            "detected_objects": [{"label": "desconocido", "position": "desconocida", "confidence": 0}],
+            "error": "Error en detección"
+        }

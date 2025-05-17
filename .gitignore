@@ -1,0 +1,9 @@
+# Ignorar archivos temporales
+temp_debug_image.jpg
+
+# Ignorar __pycache__ y archivos .pyc
+__pycache__/
+*.pyc
+
+# Ignorar .env
+.env

@@ -10,25 +10,25 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import WebSocket, WebSocketDisconnect
 from cachetools import TTLCache  # Librería para caching
 from app.services.object_detection import detect_objects
-from app.services.text_extraction import extract_text_from_image
-from app.services.description import describe_scene
+from app.services.description_ai import generate_description
+# filepath: c:\Users\Libardo Perdomo\VsGuardPy_v1\app\routes\websocket.py
+from app.utils.commands import handle_command
 
 # Configurar un caché en memoria con máximo 100 entradas y un TTL de 60 segundos.
 cache = TTLCache(maxsize=100, ttl=60)
 logger = logging.getLogger(__name__)
 
-# Lista global para almacenar conexiones activas
-active_connections = []
+# Lista global para almacenar conexiones activas con estado
+active_connections = {}
 
 # Configurar un ThreadPoolExecutor para procesamiento paralelo (ajusta el número de hilos según tus recursos)
 executor = ThreadPoolExecutor(max_workers=4)
 
 def process_image(image_bytes: bytes) -> dict:
-    inicia_proceso_image = time.perf_counter()
     """
     Esta función procesa la imagen:
       - Detecta objetos.
-      - Extrae texto usando extract_text_from_image.
+      - Extrae texto usando extract_text_from_image.(por ahora no se usa)
       - Genera la descripción final con describe_scene.
     Se ejecuta en un hilo separado para no bloquear el event loop.
     """
@@ -36,21 +36,28 @@ def process_image(image_bytes: bytes) -> dict:
     response = detect_objects(image_bytes)
     
     # Extraer texto de la imagen (en este ejemplo se simula)
-    detected_text = "Texto detectado"
+    detected_text = "No hay Texto  detectado"
     
     # Generar la descripción combinando la detección y el texto extraído.
-    response["description"] = describe_scene(response.get("detected_objects", []), detected_text)
+    response["description"] = generate_description(response.get("detected_objects", []),image_bytes)
     if detected_text.strip():
         response["detected_text"] = detected_text
-
-    final_time_proceso_image = time.perf_counter() - inicia_proceso_image
-    logger.info(f"Tiempo total para procesar la imagen: {final_time_proceso_image:.2f} segundos.")
     return response
 
-async def websocket_endpoint(websocket: WebSocket):
+async def send_safely(websocket: WebSocket, data: dict) -> bool:
+    """Envía datos al WebSocket de manera segura, manejando posibles desconexiones."""
+    try:
+        await websocket.send_json(data)
+        return True
+    except Exception as e:
+        logger.error(f"Error al enviar datos al WebSocket: {e}")
+        return False
+
+async def websocket_endpoint_SC(websocket: WebSocket):
     # Extraer client_id de los query params antes de aceptar la conexión.
     query_params = parse_qs(websocket.scope.get("query_string", b"").decode("utf-8"))
     client_id_list = query_params.get("client_id")
+    logger.info(f"client_id recibido: {client_id_list}")
     if not client_id_list:
         logger.error("No se proporcionó client_id en la conexión.")
         await websocket.close()
@@ -58,43 +65,39 @@ async def websocket_endpoint(websocket: WebSocket):
     client_id = client_id_list[0]
 
     await websocket.accept()
-    active_connections.append(websocket)
-     # Agregar la conexión a la lista de conexiones del client_id.
-    # if client_id not in active_connections:
-    #     active_connections[client_id] = []
-    # active_connections[client_id].append(websocket)
-    # logger.info(f"Nuevo cliente {client_id} conectado. Conexiones activas para este ID: {len(active_connections[client_id])}")
+    # Agregar la conexión a la lista de conexiones del client_id.
+    if client_id not in active_connections:
+        active_connections[client_id] = []
+    active_connections[client_id].append(websocket)
+    logger.info(f"Nuevo cliente {client_id} conectado. Conexiones activas para este ID: {len(active_connections[client_id])}")
 
     try:
         while True:
-            # Recibir datos: se intenta primero en binario; si falla, se intenta recibir texto y decodificar base64.
-            try:
+             # Recibir datos de forma unificada
+            message = await websocket.receive()
+            logger.info(f"Datos recibidos: {message}")
+            
+            if "bytes" in message and message["bytes"] is not None:
+                image_bytes = message["bytes"]
+            elif "text" in message and message["text"] is not None:
+                text_data = message["text"]
+
+                # Si es un comando, procesarlo y omitir la lógica de imagen
+                if await handle_command(websocket, text_data):
+                    continue
+
                 try:
-                    image_bytes = await websocket.receive_bytes()
-                except Exception as e:
-                    text_data = await websocket.receive_text()
-                    logger.info("Datos recibidos en formato texto.", text_data)
-                    try:
-                        image_bytes = base64.b64decode(text_data)
-                    except Exception as decode_err:
-                        logger.error(f"Error decodificando base64: {decode_err}")
-                        await websocket.send_json({
-                            "detected_objects": [{"label": "desconocido", "position": "desconocida", "confidence": 0}],
-                            "error": "Error en la decodificación de datos base64"
-                        })
-                        continue
-            except Exception as e:
-                logger.error(f"Error al recibir datos: {e}")
-                await websocket.send_text('{"error": "Error en la recepción de datos"}')
-                break
+                    image_bytes = base64.b64decode(text_data)
+                except Exception as decode_err:
+                    logger.error(f"Error decodificando base64: {decode_err}")
+                    continue
+            else:
+                logger.error("No se recibieron datos válidos.")
+                continue
             
             # Validar que image_bytes es efectivamente de tipo bytes
             if not isinstance(image_bytes, bytes):
                 logger.error("El dato recibido no es del tipo esperado (bytes).")
-                await websocket.send_json({
-                    "detected_objects": [{"label": "desconocido", "position": "desconocida", "confidence": 0}],
-                    "error": "Formato de datos inválido"
-                })
                 continue
             
             # Calcular un hash para la imagen recibida y usarlo para el sistema de caché.
@@ -102,26 +105,48 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if image_hash in cache:
                 result = cache[image_hash]
-                logger.info("Resultado obtenido del caché.")
             else:
                 # Procesar la imagen en un hilo separado 
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(executor, process_image, image_bytes)
                 cache[image_hash] = result
                            
-            # Enviar la respuesta a todos los clientes conectados
+            # Enviar la respuesta solo a las conexiones del client_id actual
             time_save_cache = time.perf_counter()
-            for connection in active_connections:
-                await connection.send_json(result)
-            time_final_save_cache = time.perf_counter() - time_save_cache
-            logger.info(f"Respuesta enviada a {len(active_connections)} clientes en: {time_final_save_cache:.2f} segundos.")
+            send_count = 0
+            logger.info(f"Enviando respuesta a {len(active_connections[client_id])} conexiones activas para client_id {client_id}.")
 
+            if client_id in active_connections:
+                # Lista para almacenar índices de conexiones fallidas
+                to_remove = []
+                for i, conn in enumerate(active_connections[client_id]):
+                    success = await send_safely(conn, result)
+                    if success:
+                        send_count += 1
+                    else:
+                        to_remove.append(i)
+                        
+                # Eliminar conexiones fallidas (en orden inverso)
+                for idx in sorted(to_remove, reverse=True):
+                    active_connections[client_id].pop(idx)
+                    
+                # Si no quedan conexiones, eliminamos la clave
+                if not active_connections[client_id]:
+                    del active_connections[client_id]
+
+            time_final_save_cache = time.perf_counter() - time_save_cache
+            logger.info(f"Respuesta enviada a {send_count} conexiones para client_id {client_id} en: {time_final_save_cache:.2f} segundos.")
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
-        logger.info(f"Cliente desconectado. Conexiones activas: {len(active_connections)}")
+        logger.info(f"Cliente {client_id} desconectado.")
     except Exception as e:
         logger.error(f"Error en WebSocket: {e}")
-        await websocket.send_json({
-            "detected_objects": [{"label": "desconocido", "position": "desconocida", "confidence": 0}],
-            "error": "Error en detección"
-        })
+    finally:
+        # Asegurarse de que la conexión se elimine de la lista al finalizar
+        if client_id in active_connections:
+            # Encontrar y eliminar esta conexión específica
+            if websocket in active_connections[client_id]:
+                active_connections[client_id].remove(websocket)
+                # Si no quedan conexiones para este cliente, eliminar la entrada
+                if not active_connections[client_id]:
+                    del active_connections[client_id]
+            logger.info(f"Conexión del cliente {client_id} eliminada. Conexiones activas totales: {sum(len(c) for c in active_connections.values())}")
